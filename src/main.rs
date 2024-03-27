@@ -36,47 +36,45 @@ fn show_config_setter(df: DialogFrame, config: &mut ConfigData) -> Result<Dialog
     config.set_field(&shift.status);
     Ok(shift.next)
 }
-fn show_game_mover(df: DialogFrame, play_data: &mut PlayData) -> Result<DialogType> {
-    let shift = df.begin()?;
-    play_data.set_field(&shift.status);
-    Ok(shift.next)
+fn show_game_mover(df: DialogFrame, play_data: &mut PlayData) {
+    if let Ok(shift) = df.begin() {
+        play_data.set_field(&shift.status);
+    }
 }
 fn begin_game_env(df: DialogFrame, play_data: &mut PlayData, config: &ConfigData) -> Result<DialogType> {
     play_data.init(config);
     let mut next_dialog = Ok(DialogType::from_turn(&play_data.first_turn));
 
     loop {
-        next_dialog = match next_dialog? {
+        match next_dialog? {
             DialogType::GamePlayer => show_game_mover(get_game_player(play_data), play_data),
             DialogType::GameNpc => show_game_mover(move_game_npc(play_data), play_data),
             DialogType::None => { break; }
             _ => { bail!("Unexpected dialog type in game env.") }
         };
-        next_dialog = eval_board(next_dialog?, play_data);
+        next_dialog = get_next_game_dialog(play_data);
     }
     Ok(df.begin()?.next)
 }
-fn eval_board(dt: DialogType, play_data: &mut PlayData) -> Result<DialogType> {
-    if play_data.availables.len() > 0 { return Ok(dt); }
-    play_data.pass_turn();
-    if play_data.availables.len() > 0 { return Ok(dt.toggle_player()); }
-    show_result(play_data);
-    Ok(DialogType::None)
+fn get_next_game_dialog(play_data: &mut PlayData) -> Result<DialogType> {
+    match play_data.turn {
+        StoneType::Black => if let PlayTurn::First = play_data.first_turn { Ok(DialogType::GamePlayer) } else { Ok(DialogType::GameNpc) },
+        StoneType::White => if let PlayTurn::First = play_data.first_turn { Ok(DialogType::GameNpc) } else { Ok(DialogType::GamePlayer) },
+        StoneType::Null => { show_result(play_data); Ok(DialogType::None) },
+    }
 }
 fn show_result(play_data: &PlayData) {
     let (you, npc) = match play_data.first_turn {
-        PlayTurn::First => (play_data.get_stone_addrs(StoneType::Black).iter().count(), play_data.get_stone_addrs(StoneType::White).iter().count()),
-        PlayTurn::Second => (play_data.get_stone_addrs(StoneType::White).iter().count(), play_data.get_stone_addrs(StoneType::Black).iter().count()),
+        PlayTurn::First => (play_data.get_stone_addrs(StoneType::Black).len(), play_data.get_stone_addrs(StoneType::White).len()),
+        PlayTurn::Second => (play_data.get_stone_addrs(StoneType::White).len(), play_data.get_stone_addrs(StoneType::Black).len()),
         _ => (0, 0),
     };
     println!("{}", play_data.get_board_status());
     println!("You: {}, Npc: {}", you, npc);
-    if you > npc {
-        println!("You win!!!\n");
-    } else if you == npc {
-        println!("---Draw---\n");
-    } else {
-        println!("You lose...\n");
+    match you {
+        you if you > npc => println!("You win!!!\n"),
+        you if you < npc => println!("You lose...\n"),
+        _ => println!("---Draw---\n")
     }
 }
 fn move_game_npc(play_data: &PlayData) -> DialogFrame {
@@ -90,7 +88,7 @@ fn get_move_easy(play_data: &PlayData) -> Address {
     let mut move_addr = Address(0, 0);
     let mut current_score = -200;
     for addr in play_data.availables.iter() {
-        let eval_score = get_board_eval(&play_data.level, &addr);
+        let eval_score = get_board_eval(&play_data.level, addr);
         if eval_score < current_score { continue; }
         if eval_score == current_score && get_random_bool() { continue; }
         current_score = eval_score;
@@ -99,15 +97,15 @@ fn get_move_easy(play_data: &PlayData) -> Address {
     move_addr
 }
 fn get_move_normal(play_data: &PlayData) -> Address {
-    if play_data.availables.iter().count() == 1 { return *play_data.availables.iter().next().unwrap_or(&Address(0, 0)); }
+    if play_data.availables.len() == 1 { return *play_data.availables.first().unwrap_or(&Address(0, 0)); }
     let mut move_addr = Address(0, 0);
     let mut max_score = -200.;
     for addr in play_data.availables.iter() {
         let mut sim = play_data.light_clone();
-        sim.sim_game(&addr);
+        sim.sim_game(addr);
         let board_score = get_board_eval(&play_data.level, addr) as f64 - sim.availables.iter().map(|x| get_board_eval(&play_data.level, x)).max().unwrap_or_default() as f64;
-        let stable_score = sim.get_stable_addrs(play_data.turn).iter().count() as f64 - sim.get_stable_addrs(sim.turn).iter().count() as f64;
-        let avail_score = sim.availables.iter().count() as f64;
+        let stable_score = sim.get_stable_addrs(play_data.turn).len() as f64 - sim.get_stable_addrs(sim.turn).len() as f64;
+        let avail_score = sim.availables.len() as f64;
         let total_score = scale_stable_score(stable_score) * 0.6 + scale_board_score(board_score) * 0.3 - scale_avail_score(avail_score) * 0.1;
         if total_score > max_score { max_score = total_score; move_addr = *addr; }
     }
@@ -148,10 +146,6 @@ fn scale_avail_score(score: f64) -> f64 {
 }
 
 
-
-
-
-
 ///////////////////////////////////////////////////////////////////////
 #[derive(Clone, Copy)]
 enum DialogType {
@@ -170,13 +164,6 @@ impl DialogType {
         match turn {
             PlayTurn::First => DialogType::GamePlayer,
             PlayTurn::Second => DialogType::GameNpc,
-            _ => DialogType::None,
-        }
-    }
-    fn toggle_player(&self) -> Self {
-        match self {
-            DialogType::GamePlayer => DialogType::GameNpc,
-            DialogType::GameNpc => DialogType::GamePlayer,
             _ => DialogType::None,
         }
     }
@@ -223,14 +210,14 @@ impl StoneType {
             _ => StoneType::Null,
         }
     }
-    fn to_string(&self) -> &str {
+    fn get_string(&self) -> &str {
         match self {
             StoneType::Null => "-",
             StoneType::Black => "x",
             StoneType::White => "o",
         }
     }
-    fn to_another_string(&self) -> &str {
+    fn get_another_string(&self) -> &str {
         match self {
             StoneType::Null => "?",
             StoneType::Black => "X",
@@ -353,15 +340,15 @@ impl PlayData {
         if !self.availables.contains(addr) { return false; }
         self.move_stone(addr);
         self.history.push((self.turn, *addr));
-        self.turn = self.turn.toggle_stone();
-        self.availables = self.get_availables();
+        self.pass_turn();
+        if !self.availables.len() > 0 { self.pass_turn() }
+        if !self.availables.len() > 0 { self.turn = StoneType::Null }
         true
     }
     fn sim_game(&mut self, addr: &Address) -> bool {
         if !self.availables.contains(addr) { return false; }
         self.move_stone(addr);
-        self.turn = self.turn.toggle_stone();
-        self.availables = self.get_availables();
+        self.pass_turn();
         true
     }
     fn move_stone(&mut self, source: &Address) {
@@ -388,7 +375,7 @@ impl PlayData {
         for addr in Self::get_board_addrs() {
             if addr.is_left_edge() { status += &format!("{}| ", row_count); }
             let stone = self.get_stone(&addr);
-            status += if self.is_another_string(&addr, stone) { stone.to_another_string() } else { stone.to_string() };
+            status += if self.is_another_string(&addr, stone) { stone.get_another_string() } else { stone.get_string() };
             status += " ";
             if addr.is_right_edge() { status += &format!("|{}\n", row_count); row_count += 1; }
         }
@@ -409,7 +396,7 @@ impl PlayData {
     }
     fn is_available(&self, addr: &Address) -> bool {
         for offset in Self::get_around_offsets() {
-            if self.get_reverse_addrs(addr, offset).len() > 0 { return true; }
+            if !self.get_reverse_addrs(addr, offset).is_empty() { return true; }
         }
         false
     }
@@ -513,7 +500,7 @@ impl Address {
     // fn is_valid_str_col(c: &char) -> bool { !Self::ADDR_COLS.contains(c) }
     // fn is_valid_str_row(r: &char) -> bool { !Self::ADDR_ROWS.contains(r) }
     // fn get_i32_addr(&self) -> (i32, i32) { (self.0 as i32, self.1 as i32) }
-    fn to_string(&self) -> String {
+    fn get_string(&self) -> String {
         if !self.is_valid_address() { return String::new(); }
         let Address(r, c) = *self;
         format!("{}{}", Self::ADDR_COLS[c], Self::ADDR_ROWS[r])
@@ -604,21 +591,21 @@ impl DialogFrame {
     }
     fn show_info(&self) {
         if !self.info_text.is_empty() {
-            println!("");
+            println!();
             println!("{}", self.info_text);
             self.action_map.keys()
                 .filter_map(|k| self.action_map.get_key_value(k))
                 .for_each(|(x, y)| if !y.help.is_empty() {println!("{} -> {}", *x, y.help);});
-            println!("");
+            println!();
         }
     }
     fn show_invalid(&self) {
         println!("Not acceptable string.");
         println!("availables: [{}]", self.action_map.keys().map(|s| &**s).collect::<Vec<_>>().join(","));
-        println!("");
+        println!();
     }
     fn begin(&self) -> Result<StatusShift> {
-        if self.action_map.len() == 0 { bail!("Not defined action set."); }
+        if self.action_map.is_empty() { bail!("Not defined action set."); }
         self.show_info();
         loop {
             match self.action_map.get(&(self.input_func)()) {
@@ -635,7 +622,7 @@ impl DialogFrame {
 
 fn get_input() -> String {
     let mut input = String::new();
-    if let Ok(_) = io::stdin().read_line(&mut input) {
+    if io::stdin().read_line(&mut input).is_ok() {
         input = input.trim().to_string()
     }
     input
@@ -648,8 +635,8 @@ fn get_random_bool() -> bool {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() % 2 > 0
 }
 
-///////////////////////////////////////////////////////////////////////
 
+///////////////////////////////////////////////////////////////////////
 fn get_title() -> DialogFrame {
     DialogFrame::new(
         "/***** R E V E R S I *****/\nPlease type char.",
@@ -723,7 +710,7 @@ fn get_game_player(play_data: &PlayData) -> DialogFrame {
 fn get_player_preset(play_data: &PlayData) -> Vec<(String, String, String, DataEnum, DialogType)> {
     let mut preset = Vec::new();
     for addr in play_data.availables.iter() {
-        preset.push((addr.to_string(), "".to_string(), "".to_string(), DataEnum::Move(*addr), DialogType::GameNpc));
+        preset.push((addr.get_string(), "".to_string(), "".to_string(), DataEnum::Move(*addr), DialogType::GameNpc));
     }
     preset
 }
@@ -831,15 +818,15 @@ mod tests{
 
         assert_eq!(vec![addr_up_left, addr_up_right, addr_down_left, addr_down_right], Address::get_corners());
 
-        assert_eq!(addr_up_left.to_string(),"a1".to_string());
-        assert_eq!(addr_up_right.to_string(),"h1".to_string());
-        assert_eq!(addr_down_left.to_string(),"a8".to_string());
-        assert_eq!(addr_down_right.to_string(),"h8".to_string());
-        assert_eq!(addr_mid.to_string(),"e5".to_string());
-        assert_eq!(addr_up_mid.to_string(),"d1".to_string());
-        assert_eq!(addr_down_mid.to_string(),"e8".to_string());
-        assert_eq!(addr_left_mid.to_string(),"a5".to_string());
-        assert_eq!(addr_right_mid.to_string(),"h4".to_string());
+        assert_eq!(addr_up_left.get_string(),"a1".to_string());
+        assert_eq!(addr_up_right.get_string(),"h1".to_string());
+        assert_eq!(addr_down_left.get_string(),"a8".to_string());
+        assert_eq!(addr_down_right.get_string(),"h8".to_string());
+        assert_eq!(addr_mid.get_string(),"e5".to_string());
+        assert_eq!(addr_up_mid.get_string(),"d1".to_string());
+        assert_eq!(addr_down_mid.get_string(),"e8".to_string());
+        assert_eq!(addr_left_mid.get_string(),"a5".to_string());
+        assert_eq!(addr_right_mid.get_string(),"h4".to_string());
 
         assert_eq!(addr_up_right, (addr_up_left + Offset::to_right() * 7).unwrap());
     }
